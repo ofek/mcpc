@@ -35,6 +35,7 @@ import { updateSession, getSession } from './sessions.js';
 import { createLogger } from './logger.js';
 import {
   ClientError,
+  IpcTimeoutError,
   NetworkError,
   isAuthenticationError,
   createServerAuthError,
@@ -804,15 +805,21 @@ interface BridgeHealthResult {
  * @param timeoutSecs - Optional request timeout in seconds (the `--timeout` value). Without it the
  *   bridge client's default request timeout applies. The health check is what blocks while a
  *   server completes (or fails) its handshake, so this is where `--timeout` must take effect.
+ * @param connectRetryTimeoutMillis - Optional socket retry window; zero probes an existing bridge once.
  * @returns Health check result with error details if unhealthy
  */
 async function checkBridgeHealth(
   socketPath: string,
-  timeoutSecs?: number
+  timeoutSecs?: number,
+  connectRetryTimeoutMillis?: number
 ): Promise<BridgeHealthResult> {
   const client = new BridgeClient(socketPath);
   try {
-    await client.connect();
+    await client.connect(
+      connectRetryTimeoutMillis === undefined
+        ? undefined
+        : { retryTimeoutMillis: connectRetryTimeoutMillis }
+    );
     // getServerDetails blocks until MCP client is connected, then returns info
     // If MCP connection fails, the bridge will return an error via IPC
     await client.request('getServerDetails', undefined, timeoutSecs);
@@ -870,6 +877,25 @@ export async function ensureBridgeReady(
   // Socket path is PID-based: each bridge instance gets its own unique path
   const socketPath = session.pid ? getSocketPath(sessionName, session.pid) : null;
 
+  if (socketPath) {
+    // A responsive bridge proves readiness without an expensive Windows process scan.
+    const result = await checkBridgeHealth(socketPath, timeoutSecs, 0);
+    if (result.healthy) {
+      logger.debug(`Bridge for ${sessionName} is healthy`);
+      return socketPath;
+    }
+    if (result.error) {
+      await classifyAndThrowSessionError(sessionName, session, result.error.message, result.error);
+      if (result.error instanceof IpcTimeoutError) {
+        // A slow health request does not establish that the bridge has died.
+        throw result.error;
+      }
+      if (!(result.error instanceof NetworkError)) {
+        throw new ClientError(enrichErrorMessage(result.error.message, session.server.url));
+      }
+    }
+  }
+
   // Quick check: is the process alive?
   const processAlive = session.pid ? isProcessAlive(session.pid) : false;
 
@@ -884,6 +910,9 @@ export async function ensureBridgeReady(
     if (result.error) {
       const errorMessage = result.error.message || '';
       await classifyAndThrowSessionError(sessionName, session, errorMessage, result.error);
+      if (result.error instanceof IpcTimeoutError) {
+        throw result.error;
+      }
       if (result.error instanceof NetworkError) {
         logger.debug(`Bridge process alive but socket not responding for ${sessionName}`);
       } else {
@@ -921,6 +950,9 @@ export async function ensureBridgeReady(
   // Not healthy after restart - classify the error
   const errorMsg = result.error?.message || 'unknown error';
   await classifyAndThrowSessionError(sessionName, session, errorMsg, result.error);
+  if (result.error instanceof IpcTimeoutError) {
+    throw result.error;
+  }
 
   // Other errors - provide enriched error with hint to view logs
   const serverUrl = session.server.url;

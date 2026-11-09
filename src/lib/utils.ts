@@ -618,7 +618,7 @@ function isProcessAliveTasklist(pid: number): boolean {
       const match = /"(\d+)"/.exec(line);
       if (match) _tasklistCache.add(Number(match[1]));
     }
-    _tasklistCacheTime = now;
+    _tasklistCacheTime = Date.now();
     _tasklistFailedAt = 0;
     return _tasklistCache.has(pid);
   } catch {

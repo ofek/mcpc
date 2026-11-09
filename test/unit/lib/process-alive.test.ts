@@ -39,6 +39,7 @@ describe('isProcessAlive on Windows', () => {
   afterEach(() => {
     setPlatform(REAL_PLATFORM);
     invalidateProcessAliveCache();
+    vi.restoreAllMocks();
   });
 
   it('answers from the tasklist output when tasklist works', () => {
@@ -48,6 +49,25 @@ describe('isProcessAlive on Windows', () => {
     expect(isProcessAlive(4243)).toBe(false);
     // One tasklist run serves every lookup within the cache window
     expect(execFileSync).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the completed scan cached even when tasklist takes longer than the TTL', () => {
+    let nowMillis = 10_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => nowMillis);
+    vi.mocked(execFileSync).mockImplementation(() => {
+      nowMillis += 3_500;
+      return tasklistListing(4242);
+    });
+
+    expect(isProcessAlive(4242)).toBe(true);
+    nowMillis += 1_999;
+    expect(isProcessAlive(4242)).toBe(true);
+    expect(isProcessAlive(4243)).toBe(false);
+    expect(execFileSync).toHaveBeenCalledTimes(1);
+
+    nowMillis += 1;
+    expect(isProcessAlive(4242)).toBe(true);
+    expect(execFileSync).toHaveBeenCalledTimes(2);
   });
 
   it('still reports a live PID alive when tasklist fails (#427)', () => {
